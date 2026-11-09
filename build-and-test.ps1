@@ -16,7 +16,7 @@ try {
     $env:TEMP = $BuildDirectory; $env:TMP = $BuildDirectory
     $common = @('--target=x86_64-w64-mingw32','-std=c++23','-Wall','-Wextra')
     & $compiler @common '-O2' '-shared' '-DWH_MOD' '-DUNICODE' '-D_UNICODE' `
-        '-DWH_MOD_ID=L"explorer-daily-groups"' '-DWH_MOD_VERSION=L"0.1.2"' `
+        '-DWH_MOD_ID=L"explorer-daily-groups"' '-DWH_MOD_VERSION=L"0.1.3"' `
         '-include' 'windhawk_api.h' (Join-Path $PSScriptRoot 'explorer-daily-groups.wh.cpp') `
         $library '-lole32' '-lpropsys' '-lversion' '-luuid' `
         '-o' (Join-Path $BuildDirectory 'compile-check.dll')

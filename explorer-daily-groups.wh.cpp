@@ -2,7 +2,7 @@
 // @id              explorer-daily-groups
 // @name            Explorer Daily Groups
 // @description     Experimental daily date grouping. Disabled by default; see Readme and build restrictions.
-// @version         0.1.2
+// @version         0.1.3
 // @author          Sanowo
 // @include         explorer.exe
 // @architecture    x86-64
@@ -106,7 +106,7 @@ bool Selected(REFPROPERTYKEY key) {
 }
 struct Context {
     void* item;
-    PROPERTYKEY key;
+    PROPERTYKEY key{};
     bool tokenProduced = false;
     FILETIME token{};
 };
@@ -118,16 +118,13 @@ struct Scope {
 };
 
 using GroupFn = HRESULT(WINAPI*)(IPropertyDescription*, PROPDESC_GROUPING_RANGE*);
-using FormatFn = HRESULT(WINAPI*)(IPropertyDescription*, REFPROPVARIANT,
-                                PROPDESC_FORMAT_FLAGS, PWSTR*);
+using FormatFn = decltype(&PSFormatForDisplay);
 using CategoryFn = HRESULT(WINAPI*)(void*, void*, IShellFolder2*, PROPVARIANT*);
 using ValueFn = HRESULT(WINAPI*)(void*, REFPROPERTYKEY, PROPVARIANT*);
-using KeyFn = HRESULT(WINAPI*)(void*, PROPERTYKEY*);
 GroupFn g_group;
 FormatFn g_format;
 CategoryFn g_category;
 ValueFn g_value;
-KeyFn g_key;
 
 HRESULT WINAPI GroupHook(IPropertyDescription* self, PROPDESC_GROUPING_RANGE* range) {
     HRESULT hr = g_group(self, range);
@@ -141,23 +138,21 @@ HRESULT WINAPI GroupHook(IPropertyDescription* self, PROPDESC_GROUPING_RANGE* ra
 }
 HRESULT WINAPI CategoryHook(void* self, void* item, IShellFolder2* folder,
                             PROPVARIANT* category) {
-    PROPERTYKEY key{};
-    // Resolve a native member function rather than reading private object fields.
-    bool selected = SUCCEEDED(g_key(self, &key)) && Selected(key);
-    if (selected && ++g_scopes == 1)
-        Wh_Log(L"First hit: target date reached CDetailCategorizer");
-    Context context{item, key};
-    Scope scope(selected ? &context : nullptr);
+    // The item read supplies the property key on the correct interface.
+    Context context{item};
+    Scope scope(&context);
     return g_category(self, item, folder, category);
 }
 HRESULT WINAPI ValueHook(void* self, REFPROPERTYKEY key, PROPVARIANT* value) {
     HRESULT hr = g_value(self, key, value);
     auto context = g_context;
     if (hr == S_OK && value && value->vt == VT_FILETIME && context &&
-        self == context->item && IsEqualPropertyKey(key, context->key)) {
+        self == context->item && Selected(key)) {
+        if (++g_scopes == 1) Wh_Log(L"First hit: target date read in CDetailCategorizer");
         FILETIME token{};
         if (daily::MakeDateToken(value->filetime, g_zone, &token)) {
             value->filetime = token;
+            context->key = key;
             context->token = token;
             context->tokenProduced = true;
             if (++g_tokens == 1) Wh_Log(L"First hit: item timestamp converted to local day");
@@ -165,17 +160,20 @@ HRESULT WINAPI ValueHook(void* self, REFPROPERTYKEY key, PROPVARIANT* value) {
     }
     return hr;
 }
-HRESULT WINAPI FormatHook(IPropertyDescription* self, REFPROPVARIANT value,
-                          PROPDESC_FORMAT_FLAGS flags, PWSTR* text) {
+HRESULT WINAPI FormatHook(REFPROPERTYKEY key, REFPROPVARIANT value,
+                          PROPDESC_FORMAT_FLAGS flags, PWSTR text, DWORD count) {
     auto context = g_context;
-    PROPERTYKEY key{};
     if (context && context->tokenProduced && value.vt == VT_FILETIME &&
         CompareFileTime(&value.filetime, &context->token) == 0 &&
-        SUCCEEDED(self->GetPropertyKey(&key)) && IsEqualPropertyKey(key, context->key)) {
-        if (++g_labels == 1) Wh_Log(L"First hit: daily header formatted");
-        return daily::FormatToken(value.filetime, text);
+        IsEqualPropertyKey(key, context->key)) {
+        PWSTR date = nullptr;
+        HRESULT hr = daily::FormatToken(value.filetime, &date);
+        if (SUCCEEDED(hr)) hr = StringCchCopyW(text, count, date);
+        CoTaskMemFree(date);
+        if (SUCCEEDED(hr) && ++g_labels == 1) Wh_Log(L"First hit: daily header formatted");
+        return hr;
     }
-    return g_format(self, value, flags, text);
+    return g_format(key, value, flags, text, count);
 }
 bool VersionIs(HMODULE module, DWORD majorMinor, DWORD buildRevision) {
     wchar_t path[MAX_PATH];
@@ -222,7 +220,6 @@ BOOL Wh_ModInit() {
     const WindhawkUtils::SYMBOL_HOOK hooks[] = {
         {{L"protected: virtual long __cdecl CDetailCategorizer::OnGetItemCategory(struct ICategorizableItem *,struct IShellFolder2 *,struct tagPROPVARIANT *)"}, &g_category, CategoryHook},
         {{L"public: virtual long __cdecl CCategorizableItemOnItemStore::GetValue(struct _tagpropertykey const &,struct tagPROPVARIANT *)"}, &g_value, ValueHook},
-        {{L"public: virtual long __cdecl CBaseCategorizer::GetPropertyKey(struct _tagpropertykey *)"}, &g_key},
     };
     if (!WindhawkUtils::HookSymbols(storage, hooks, ARRAYSIZE(hooks))) {
         Wh_Log(L"Init failed: Windows.Storage symbols or hooks unavailable");
@@ -238,14 +235,15 @@ BOOL Wh_ModInit() {
     // Hook through the actual interface pointer so adjustment thunks are respected.
     auto a = *reinterpret_cast<void***>(modified.Get());
     auto b = *reinterpret_cast<void***>(created.Get());
-    constexpr size_t groupingSlot = 13, formatSlot = 22;
-    if (a[groupingSlot] != b[groupingSlot] || a[formatSlot] != b[formatSlot]) {
+    constexpr size_t groupingSlot = 13;
+    FARPROC format = GetProcAddress(propsys, "PSFormatForDisplay");
+    if (a[groupingSlot] != b[groupingSlot] || !format) {
         Wh_Log(L"Init failed: date property descriptions use different methods");
         return FALSE;
     }
     if (!Wh_SetFunctionHook(a[groupingSlot], reinterpret_cast<void*>(GroupHook),
                            reinterpret_cast<void**>(&g_group)) ||
-        !Wh_SetFunctionHook(a[formatSlot], reinterpret_cast<void*>(FormatHook),
+        !Wh_SetFunctionHook(reinterpret_cast<void*>(format), reinterpret_cast<void*>(FormatHook),
                            reinterpret_cast<void**>(&g_format))) {
         Wh_Log(L"Init failed: could not register property description hooks");
         return FALSE;
