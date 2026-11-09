@@ -2,7 +2,7 @@
 // @id              explorer-daily-groups
 // @name            Explorer Daily Groups
 // @description     Experimental daily date grouping. Disabled by default; see Readme and build restrictions.
-// @version         0.1.1
+// @version         0.1.2
 // @author          Sanowo
 // @include         explorer.exe
 // @architecture    x86-64
@@ -16,7 +16,7 @@
 
 NOT validated in Explorer. This is not a production-ready mod.
 Only the inspected DLL versions are accepted:
-windows.storage.dll 10.0.26100.9949; propsys.dll 7.0.26100.9549.
+windows.storage.dll 10.0.26100.9549 (fixed file version); propsys.dll 7.0.26100.9549.
 That is a development gate, NOT a compatibility certification.
 
 Close ALL folder windows/tabs before enabling, disabling, changing settings,
@@ -202,10 +202,18 @@ BOOL Wh_ModInit() {
     if (!g_modified && !g_created) return TRUE;
     HMODULE storage = GetModuleHandleW(L"windows.storage.dll");
     HMODULE propsys = GetModuleHandleW(L"propsys.dll");
-    if (!storage || !propsys ||
-        !VersionIs(storage, MAKELONG(0,10), MAKELONG(9949,26100)) ||
-        !VersionIs(propsys, MAKELONG(0,7), MAKELONG(9549,26100))) {
-        Wh_Log(L"Unsupported DLL versions. No hooks installed."); return FALSE;
+    if (!storage || !propsys) {
+        Wh_Log(L"Init failed: required modules not loaded (storage=%d propsys=%d)",
+               storage != nullptr, propsys != nullptr);
+        return FALSE;
+    }
+    if (!VersionIs(storage, MAKELONG(0,10), MAKELONG(9549,26100))) {
+        Wh_Log(L"Init failed: windows.storage.dll fixed version must be 10.0.26100.9549");
+        return FALSE;
+    }
+    if (!VersionIs(propsys, MAKELONG(0,7), MAKELONG(9549,26100))) {
+        Wh_Log(L"Init failed: propsys.dll fixed version must be 7.0.26100.9549");
+        return FALSE;
     }
     if (GetDynamicTimeZoneInformation(&g_zone) == TIME_ZONE_ID_INVALID) {
         Wh_Log(L"Init failed: could not read time zone");
