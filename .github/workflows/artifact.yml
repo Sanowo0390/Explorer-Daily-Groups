@@ -1,0 +1,29 @@
+name: Package Windhawk mod
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare source package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp explorer-daily-groups.wh.cpp README.md TEST-PLAN.ja.md build-and-test.ps1 tests.cpp hook-tests.cpp dist/
+          cd dist
+          sha256sum -- * > SHA256SUMS.txt
+      - name: Upload Windhawk source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Explorer-Daily-Groups-experimental
+          path: dist/
+          if-no-files-found: error
