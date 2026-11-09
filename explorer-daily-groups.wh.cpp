@@ -2,7 +2,7 @@
 // @id              explorer-daily-groups
 // @name            Explorer Daily Groups
 // @description     Experimental daily date grouping. Disabled by default; see Readme and build restrictions.
-// @version         0.1.0
+// @version         0.1.1
 // @author          Sanowo
 // @include         explorer.exe
 // @architecture    x86-64
@@ -135,7 +135,7 @@ HRESULT WINAPI GroupHook(IPropertyDescription* self, PROPDESC_GROUPING_RANGE* ra
     if (SUCCEEDED(hr) && range && *range == PDGR_DATE &&
         SUCCEEDED(self->GetPropertyKey(&key)) && Selected(key)) {
         *range = PDGR_DISCRETE;
-        ++g_ranges;
+        if (++g_ranges == 1) Wh_Log(L"First hit: date grouping range switched to discrete");
     }
     return hr;
 }
@@ -144,7 +144,8 @@ HRESULT WINAPI CategoryHook(void* self, void* item, IShellFolder2* folder,
     PROPERTYKEY key{};
     // Resolve a native member function rather than reading private object fields.
     bool selected = SUCCEEDED(g_key(self, &key)) && Selected(key);
-    if (selected) ++g_scopes;
+    if (selected && ++g_scopes == 1)
+        Wh_Log(L"First hit: target date reached CDetailCategorizer");
     Context context{item, key};
     Scope scope(selected ? &context : nullptr);
     return g_category(self, item, folder, category);
@@ -159,7 +160,7 @@ HRESULT WINAPI ValueHook(void* self, REFPROPERTYKEY key, PROPVARIANT* value) {
             value->filetime = token;
             context->token = token;
             context->tokenProduced = true;
-            ++g_tokens;
+            if (++g_tokens == 1) Wh_Log(L"First hit: item timestamp converted to local day");
         }
     }
     return hr;
@@ -171,7 +172,7 @@ HRESULT WINAPI FormatHook(IPropertyDescription* self, REFPROPVARIANT value,
     if (context && context->tokenProduced && value.vt == VT_FILETIME &&
         CompareFileTime(&value.filetime, &context->token) == 0 &&
         SUCCEEDED(self->GetPropertyKey(&key)) && IsEqualPropertyKey(key, context->key)) {
-        ++g_labels;
+        if (++g_labels == 1) Wh_Log(L"First hit: daily header formatted");
         return daily::FormatToken(value.filetime, text);
     }
     return g_format(self, value, flags, text);
@@ -206,26 +207,41 @@ BOOL Wh_ModInit() {
         !VersionIs(propsys, MAKELONG(0,7), MAKELONG(9549,26100))) {
         Wh_Log(L"Unsupported DLL versions. No hooks installed."); return FALSE;
     }
-    if (GetDynamicTimeZoneInformation(&g_zone) == TIME_ZONE_ID_INVALID) return FALSE;
+    if (GetDynamicTimeZoneInformation(&g_zone) == TIME_ZONE_ID_INVALID) {
+        Wh_Log(L"Init failed: could not read time zone");
+        return FALSE;
+    }
     const WindhawkUtils::SYMBOL_HOOK hooks[] = {
         {{L"protected: virtual long __cdecl CDetailCategorizer::OnGetItemCategory(struct ICategorizableItem *,struct IShellFolder2 *,struct tagPROPVARIANT *)"}, &g_category, CategoryHook},
         {{L"public: virtual long __cdecl CCategorizableItemOnItemStore::GetValue(struct _tagpropertykey const &,struct tagPROPVARIANT *)"}, &g_value, ValueHook},
         {{L"public: virtual long __cdecl CBaseCategorizer::GetPropertyKey(struct _tagpropertykey *)"}, &g_key},
     };
-    if (!WindhawkUtils::HookSymbols(storage, hooks, ARRAYSIZE(hooks))) return FALSE;
+    if (!WindhawkUtils::HookSymbols(storage, hooks, ARRAYSIZE(hooks))) {
+        Wh_Log(L"Init failed: Windows.Storage symbols or hooks unavailable");
+        return FALSE;
+    }
     ComPtr<IPropertyDescription> modified, created;
     if (FAILED(PSGetPropertyDescription(PKEY_DateModified, IID_PPV_ARGS(&modified))) ||
-        FAILED(PSGetPropertyDescription(PKEY_DateCreated, IID_PPV_ARGS(&created)))) return FALSE;
+        FAILED(PSGetPropertyDescription(PKEY_DateCreated, IID_PPV_ARGS(&created)))) {
+        Wh_Log(L"Init failed: could not obtain date property descriptions");
+        return FALSE;
+    }
     // IPropertyDescription's documented ABI: IUnknown + methods in propsys.h.
     // Hook through the actual interface pointer so adjustment thunks are respected.
     auto a = *reinterpret_cast<void***>(modified.Get());
     auto b = *reinterpret_cast<void***>(created.Get());
     constexpr size_t groupingSlot = 13, formatSlot = 22;
-    if (a[groupingSlot] != b[groupingSlot] || a[formatSlot] != b[formatSlot]) return FALSE;
+    if (a[groupingSlot] != b[groupingSlot] || a[formatSlot] != b[formatSlot]) {
+        Wh_Log(L"Init failed: date property descriptions use different methods");
+        return FALSE;
+    }
     if (!Wh_SetFunctionHook(a[groupingSlot], reinterpret_cast<void*>(GroupHook),
                            reinterpret_cast<void**>(&g_group)) ||
         !Wh_SetFunctionHook(a[formatSlot], reinterpret_cast<void*>(FormatHook),
-                           reinterpret_cast<void**>(&g_format))) return FALSE;
+                           reinterpret_cast<void**>(&g_format))) {
+        Wh_Log(L"Init failed: could not register property description hooks");
+        return FALSE;
+    }
     Wh_Log(L"Experimental hooks scheduled; Explorer UI behavior is unverified.");
     return TRUE;
 }
